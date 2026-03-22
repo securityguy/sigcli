@@ -1,0 +1,27 @@
+# Build output
+bin/
+
+# Runtime artifacts
+debug.log
+
+# Test artifacts
+*.test
+*.out
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+# Temporary files
+*.tmp
+*.swp
+*.swo

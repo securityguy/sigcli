@@ -478,9 +478,9 @@ func cmdReceive(addr string, raw bool) error {
 
 func main() {
 	addr := flag.String("addr", defaultAddr, "sigd address")
-	raw := flag.Bool("raw", false, "Print raw pretty-printed JSON instead of formatted output (subscribe and receive)")
+	jsonOutput := flag.Bool("json", false, "Print raw pretty-printed JSON instead of formatted output (subscribe and receive)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: sigcli [--addr %s] [--raw] <command> [args]\n\n", defaultAddr)
+		fmt.Fprintf(os.Stderr, "Usage: sigcli [--addr %s] [-json] <command> [args]\n\n", defaultAddr)
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  link              Link sigd to a Signal account (shows QR, waits for completion)\n")
 		fmt.Fprintf(os.Stderr, "  status            Show current link and connection status\n")
@@ -510,9 +510,9 @@ func main() {
 		}
 		err = cmdSend(*addr, args[1], args[2])
 	case "subscribe":
-		err = cmdSubscribe(*addr, *raw)
+		err = cmdSubscribe(*addr, *jsonOutput)
 	case "receive":
-		err = cmdReceive(*addr, *raw)
+		err = cmdReceive(*addr, *jsonOutput)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown command %q\n\n", args[0])
 		flag.Usage()

@@ -124,7 +124,16 @@ func (c *rpcClient) close() {
 // Commands
 // ---------------------------------------------------------------------------
 
-// cmdLink starts the device linking flow.
+// linkReply matches the schema.LinkReply fields returned by link.request and link.status.
+type linkReply struct {
+	Status string `json:"status"`
+	URI    string `json:"uri,omitempty"`
+	ACI    string `json:"aci,omitempty"`
+	Phone  string `json:"phone,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// cmdLink starts the device linking flow using link.request / link.status.
 func cmdLink(addr string) error {
 	c, err := dial(addr)
 	if err != nil {
@@ -132,54 +141,76 @@ func cmdLink(addr string) error {
 	}
 	defer c.close()
 
-	// Step 1: call "link" to get the URI.
-	result, err := c.call("link", map[string]string{"name": "sigcli"})
+	// Step 1: call "link.request" to start the flow and get the QR URI.
+	result, err := c.call("link.request", map[string]string{"name": "sigcli"})
 	if err != nil {
 		return err
 	}
 
-	var linkRes struct {
-		URI string `json:"uri"`
-	}
-	if err := json.Unmarshal(result, &linkRes); err != nil {
-		return fmt.Errorf("parse link result: %w", err)
+	var reply linkReply
+	if err := json.Unmarshal(result, &reply); err != nil {
+		return fmt.Errorf("parse link.request result: %w", err)
 	}
 
-	qrterminal.GenerateWithConfig(linkRes.URI, qrterminal.Config{
-		Level:          qrterminal.L,
-		Writer:         os.Stdout,
-		HalfBlocks:     true,
-		BlackChar:      "\033[40m \033[0m",     // both black
-		WhiteChar:      "\033[47m \033[0m",     // both white
-		BlackWhiteChar: "\033[40;37m▄\033[0m", // top black, bottom white
-		WhiteBlackChar: "\033[47;30m▄\033[0m", // top white, bottom black
-		QuietZone:      1,
-	})
-	fmt.Println("Scan the QR code above, or use this URI:")
-	fmt.Println(linkRes.URI)
-	fmt.Println()
+	switch reply.Status {
+	case "complete":
+		fmt.Printf("Linked! ACI: %s  Phone: %s\n", reply.ACI, reply.Phone)
+		return nil
+	case "error":
+		return fmt.Errorf("link.request failed: %s", reply.Error)
+	case "pending":
+		// Expected path — display QR and poll.
+	default:
+		return fmt.Errorf("unexpected link.request status: %s", reply.Status)
+	}
+
+	if reply.URI != "" {
+		qrterminal.GenerateWithConfig(reply.URI, qrterminal.Config{
+			Level:          qrterminal.L,
+			Writer:         os.Stdout,
+			HalfBlocks:     true,
+			BlackChar:      "\033[40m \033[0m",     // both black
+			WhiteChar:      "\033[47m \033[0m",     // both white
+			BlackWhiteChar: "\033[40;37m▄\033[0m", // top black, bottom white
+			WhiteBlackChar: "\033[47;30m▄\033[0m", // top white, bottom black
+			QuietZone:      1,
+		})
+		fmt.Println("Scan the QR code above, or use this URI:")
+		fmt.Println(reply.URI)
+		fmt.Println()
+	}
 	fmt.Printf("Waiting for device scan (up to %v)...\n", global.LinkWaitTimeout)
 
-	// Step 2: call "link.wait" with the configured deadline.
-	if err := c.conn.SetReadDeadline(time.Now().Add(global.LinkWaitTimeout)); err != nil {
-		return fmt.Errorf("set read deadline: %w", err)
+	// Step 2: poll link.status every 2 seconds until complete or timeout.
+	deadline := time.Now().Add(global.LinkWaitTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+
+		statusResult, err := c.call("link.status", struct{}{})
+		if err != nil {
+			return fmt.Errorf("link.status: %w", err)
+		}
+
+		var statusReply linkReply
+		if err := json.Unmarshal(statusResult, &statusReply); err != nil {
+			return fmt.Errorf("parse link.status result: %w", err)
+		}
+
+		switch statusReply.Status {
+		case "pending":
+			// Keep polling.
+			continue
+		case "complete":
+			fmt.Printf("Linked! ACI: %s  Phone: %s\n", statusReply.ACI, statusReply.Phone)
+			return nil
+		case "error":
+			return fmt.Errorf("linking failed: %s", statusReply.Error)
+		default:
+			return fmt.Errorf("unexpected link.status status: %s", statusReply.Status)
+		}
 	}
 
-	waitResult, err := c.call("link.wait", struct{}{})
-	if err != nil {
-		return err
-	}
-
-	var linked struct {
-		ACI   string `json:"aci"`
-		Phone string `json:"phone"`
-	}
-	if err := json.Unmarshal(waitResult, &linked); err != nil {
-		return fmt.Errorf("parse link.wait result: %w", err)
-	}
-
-	fmt.Printf("Linked! ACI: %s  Phone: %s\n", linked.ACI, linked.Phone)
-	return nil
+	return fmt.Errorf("timed out waiting for device scan after %v", global.LinkWaitTimeout)
 }
 
 // cmdStatus prints the current link and connection status.
@@ -313,22 +344,37 @@ func cmdSubscribe(addr string) error {
 		switch n.Method {
 		case "message":
 			var p struct {
-				From      string `json:"from"`
-				Body      string `json:"body"`
-				Timestamp uint64 `json:"timestamp"`
-				Type      string `json:"type"`
+				From         struct{ ID string `json:"id"` } `json:"from"`
+				To           struct{ ID string `json:"id"` } `json:"to"`
+				Body         string `json:"body"`
+				Timestamp    uint64 `json:"timestamp"`
+				Type         string `json:"type"`
+				RefTimestamp uint64 `json:"ref_timestamp"`
 			}
 			if err := json.Unmarshal(n.Params, &p); err == nil {
-				output = fmt.Sprintf("[%s] FROM %s: %s", ts, p.From, p.Body)
+				peer := p.From.ID
+				dir := "FROM"
+				if peer == "" {
+					peer = p.To.ID
+					dir = "TO"
+				}
+				switch p.Type {
+				case "delete":
+					output = fmt.Sprintf("[%s] %d DELETE [%d] %s %s", ts, p.Timestamp, p.RefTimestamp, dir, peer)
+				case "edit":
+					output = fmt.Sprintf("[%s] %d EDIT [%d] %s %s: %s", ts, p.Timestamp, p.RefTimestamp, dir, peer, p.Body)
+				default:
+					output = fmt.Sprintf("[%s] %d TEXT %s %s: %s", ts, p.Timestamp, dir, peer, p.Body)
+				}
 			}
 
 		case "receipt":
 			var p struct {
-				From string `json:"from"`
-				Type string `json:"type"`
+				From struct{ ID string `json:"id"` } `json:"from"`
+				Type string                          `json:"type"`
 			}
 			if err := json.Unmarshal(n.Params, &p); err == nil {
-				output = fmt.Sprintf("[%s] RECEIPT from %s: %s", ts, p.From, p.Type)
+				output = fmt.Sprintf("[%s] RECEIPT from %s: %s", ts, p.From.ID, p.Type)
 			}
 
 		case "status":

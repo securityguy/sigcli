@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -278,7 +279,7 @@ func cmdSend(addr, to, body string) error {
 
 // cmdSubscribe subscribes to incoming notifications and streams them to stdout
 // and debug.log until SIGINT.
-func cmdSubscribe(addr string) error {
+func cmdSubscribe(addr string, raw bool) error {
 	c, err := dial(addr)
 	if err != nil {
 		return err
@@ -340,6 +341,20 @@ func cmdSubscribe(addr string) error {
 
 		ts := time.Now().Format("2006-01-02 15:04:05")
 		var output string
+
+		if raw {
+			var pretty bytes.Buffer
+			if err := json.Indent(&pretty, line, "", "  "); err == nil {
+				output = fmt.Sprintf("[%s] %s", ts, pretty.String())
+			} else {
+				output = fmt.Sprintf("[%s] %s", ts, string(line))
+			}
+			fmt.Println(output)
+			if _, err := fmt.Fprintln(logWriter, output); err == nil {
+				_ = logWriter.Flush()
+			}
+			continue
+		}
 
 		switch n.Method {
 		case "message":
@@ -412,7 +427,7 @@ func cmdSubscribe(addr string) error {
 }
 
 // cmdReceive polls once for pending messages.
-func cmdReceive(addr string) error {
+func cmdReceive(addr string, raw bool) error {
 	c, err := dial(addr)
 	if err != nil {
 		return err
@@ -422,6 +437,16 @@ func cmdReceive(addr string) error {
 	result, err := c.call("receive", map[string]int{"timeout": 10})
 	if err != nil {
 		return err
+	}
+
+	if raw {
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, result, "", "  "); err == nil {
+			fmt.Println(pretty.String())
+		} else {
+			fmt.Println(string(result))
+		}
+		return nil
 	}
 
 	var received struct {
@@ -453,8 +478,9 @@ func cmdReceive(addr string) error {
 
 func main() {
 	addr := flag.String("addr", defaultAddr, "sigd address")
+	raw := flag.Bool("raw", false, "Print raw pretty-printed JSON instead of formatted output (subscribe and receive)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: sigcli [--addr %s] <command> [args]\n\n", defaultAddr)
+		fmt.Fprintf(os.Stderr, "Usage: sigcli [--addr %s] [--raw] <command> [args]\n\n", defaultAddr)
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  link              Link sigd to a Signal account (shows QR, waits for completion)\n")
 		fmt.Fprintf(os.Stderr, "  status            Show current link and connection status\n")
@@ -484,9 +510,9 @@ func main() {
 		}
 		err = cmdSend(*addr, args[1], args[2])
 	case "subscribe":
-		err = cmdSubscribe(*addr)
+		err = cmdSubscribe(*addr, *raw)
 	case "receive":
-		err = cmdReceive(*addr)
+		err = cmdReceive(*addr, *raw)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown command %q\n\n", args[0])
 		flag.Usage()
